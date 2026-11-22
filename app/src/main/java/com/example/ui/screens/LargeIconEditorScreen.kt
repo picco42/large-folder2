@@ -34,6 +34,7 @@ import com.example.ui.components.DockedAppPickerSheet
 import com.example.ui.components.LargeIconPreviewCard
 import com.example.util.AppInfo
 import com.example.util.AppScanner
+import com.example.util.rememberIconThemeSignature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -46,6 +47,7 @@ fun LargeIconEditorScreen(
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val themeSignature = rememberIconThemeSignature()
     val installedApps by viewModel.installedApps.collectAsState()
     val isLoadingApps by viewModel.isLoadingApps.collectAsState()
     val allLargeIcons by viewModel.allLargeIcons.collectAsState()
@@ -208,15 +210,14 @@ fun LargeIconEditorScreen(
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         if (selectedPkg.isNotBlank()) {
-                            val cached = remember(selectedPkg, selectedActivity) {
+                            val cached = remember(selectedPkg, selectedActivity, themeSignature) {
                                 AppScanner.getCachedAppIconBitmap(context, selectedPkg, selectedActivity, 96)
                             }
-                            val bmp by produceState(cached, selectedPkg, selectedActivity) {
-                                if (value == null) {
-                                    value = withContext(Dispatchers.IO) {
+                            val bmp by produceState(cached, selectedPkg, selectedActivity, themeSignature) {
+                                value = AppScanner.getCachedAppIconBitmap(context, selectedPkg, selectedActivity, 96)
+                                    ?: withContext(Dispatchers.IO) {
                                         AppScanner.getAppIconBitmap(context, selectedPkg, selectedActivity, 96)
                                     }
-                                }
                             }
                             val loaded = bmp
                             if (loaded != null) {
@@ -447,6 +448,7 @@ private fun SelectSingleAppSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val themeSignature = rememberIconThemeSignature()
     var query by remember { mutableStateOf("") }
     val filtered = remember(installedApps, query) {
         if (query.isBlank()) installedApps
@@ -511,15 +513,14 @@ private fun SelectSingleAppSheet(
             ) {
                 items(filtered, key = { it.packageName }) { app ->
                     val isSelected = app.packageName == selectedPackage
-                    val cachedBitmap = remember(app.packageName, app.activityName) {
+                    val cachedBitmap = remember(app.packageName, app.activityName, themeSignature) {
                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
                     }
-                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName) {
-                        if (value == null) {
-                            value = withContext(Dispatchers.IO) {
+                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName, themeSignature) {
+                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
+                            ?: withContext(Dispatchers.IO) {
                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 96)
                             }
-                        }
                     }
 
                     Surface(

@@ -27,6 +27,8 @@ import com.example.data.LargeIconOrientations
 import com.example.data.WidgetItemTypes
 import com.example.ui.MainViewModel
 import com.example.util.AppScanner
+import com.example.util.IconStyle
+import com.example.util.IconStyleManager
 import com.example.util.getSystemAnimationScale
 import com.example.util.scaledDurationMs
 import com.example.util.scaledSpringSpec
@@ -145,9 +147,10 @@ class ExampleRobolectricTest {
   @Test
   fun `large icon renderer fills widget cleanly for adaptive monochrome and legacy icons`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
-    Settings.Secure.putString(context.contentResolver, "theme_customization_overlay_packages", "")
+    IconStyleManager.resetMemoryCacheForTests()
 
-    // 1. Adaptive icon (2x1): background fills whole width; centered foreground stays 1:1 unstretched
+    // 1. Adaptive icon (2x1) without monochrome (or Original style): background fills whole width; centered foreground stays 1:1 unstretched
+    IconStyleManager.setIconStyle(context, IconStyle.ORIGINAL)
     val fgBmp = Bitmap.createBitmap(108, 108, Bitmap.Config.ARGB_8888).also { bmp ->
       Canvas(bmp).drawRect(24f, 24f, 84f, 84f, Paint().apply { color = Color.RED })
     }
@@ -178,12 +181,8 @@ class ExampleRobolectricTest {
     }
     assertTrue("Foreground width ($redWidth) and height ($redHeight) must stay 1:1", redWidth > 30 && kotlin.math.abs(redWidth - redHeight) <= 2)
 
-    // 2. Color Palette active + monochrome layer fills entire 1x2 widget with theme colors
-    Settings.Secure.putString(
-      context.contentResolver,
-      "theme_customization_overlay_packages",
-      "{\"android.theme.customization.color_palette\":\"1\"}"
-    )
+    // 2. Themed style + monochrome layer fills entire 1x2 widget with theme colors
+    IconStyleManager.setIconStyle(context, IconStyle.THEMED)
     val monoBmp = Bitmap.createBitmap(108, 108, Bitmap.Config.ARGB_8888).also { bmp ->
       Canvas(bmp).drawRect(28f, 28f, 80f, 80f, Paint().apply { color = Color.BLACK })
     }
@@ -233,17 +232,10 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `color palette detection and dark light adaptive fallback`() {
+  fun `color palette tones differ across dark and light modes and keep non-monochrome icons original`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
-    Settings.Secure.putString(context.contentResolver, "theme_customization_overlay_packages", "")
-    assertFalse(AppScanner.isColorPaletteActive(context))
-
-    Settings.Secure.putString(
-      context.contentResolver,
-      "theme_customization_overlay_packages",
-      "{\"android.theme.customization.color_palette\":\"1\"}"
-    )
-    assertTrue(AppScanner.isColorPaletteActive(context))
+    IconStyleManager.resetMemoryCacheForTests()
+    IconStyleManager.setIconStyle(context, IconStyle.THEMED)
 
     val lightConfig = Configuration(context.resources.configuration).apply {
       uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_NO
@@ -260,7 +252,7 @@ class ExampleRobolectricTest {
       AppScanner.getDynamicPaletteColors(darkCtx)
     )
 
-    // Non-monochrome AdaptiveIconDrawable must render full color cleanly even when Color Palette is enabled
+    // Non-monochrome AdaptiveIconDrawable must render full color cleanly even when Themed style is enabled
     val adaptive = AdaptiveIconDrawable(ColorDrawable(Color.BLUE), ColorDrawable(Color.RED))
     val rendered = AppScanner.renderIconBitmap(darkCtx, adaptive, 96)
     assertEquals(96, rendered.width)
@@ -282,5 +274,63 @@ class ExampleRobolectricTest {
     val context = ApplicationProvider.getApplicationContext<Context>()
     Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0.5f)
     assertEquals(0.5f, getSystemAnimationScale(context), 0.01f)
+  }
+
+  @Test
+  fun `widget preview layouts inflate non-empty filled cards and buildPinPreviewRemoteViews uses real layouts`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val inflater = LayoutInflater.from(context)
+
+    val folderPreview = inflater.inflate(R.layout.widget_folder_preview, null)
+    assertNotNull(folderPreview.background)
+    assertNotNull(folderPreview.findViewById(R.id.preview_slot_1))
+    assertNotNull(folderPreview.findViewById(R.id.preview_slot_4))
+
+    for (layoutId in listOf(
+      R.layout.widget_icon_preview_1x1,
+      R.layout.widget_icon_preview_1x2,
+      R.layout.widget_icon_preview_2x1
+    )) {
+      val root = inflater.inflate(layoutId, null)
+      assertNotNull("Preview $layoutId must have non-transparent card background", root.background)
+      assertNotNull(root.findViewById(R.id.large_icon_preview_image))
+    }
+
+    val expectedLayouts = mapOf(
+      FolderLayouts.GRID_3X3 to R.layout.widget_folder_3x3,
+      FolderLayouts.GRID_2X2 to R.layout.widget_folder_2x2,
+      FolderLayouts.ROW_1X2 to R.layout.widget_folder_1x2,
+      FolderLayouts.ROW_1X4 to R.layout.widget_folder_1x4
+    )
+    val apps = listOf(
+      com.example.data.FolderAppEntity(
+        folderId = 1L,
+        packageName = context.packageName,
+        activityName = "MainActivity",
+        appName = "Test"
+      )
+    )
+    for ((layoutType, expectedRes) in expectedLayouts) {
+      val rv = com.example.widget.FolderWidgetProvider.buildPinPreviewRemoteViews(
+        context = context,
+        folder = FolderEntity(id = 1L, name = "Pinned", layoutType = layoutType),
+        apps = apps
+      )
+      assertNotNull(rv)
+      assertEquals(expectedRes, rv!!.layoutId)
+    }
+
+    val iconRv = com.example.widget.BaseLargeIconWidgetProvider.buildPinPreviewRemoteViews(
+      context = context,
+      largeIcon = LargeIconEntity(
+        id = 2L,
+        appName = "App",
+        packageName = context.packageName,
+        activityName = "MainActivity",
+        orientation = LargeIconOrientations.ICON_2X1
+      )
+    )
+    assertNotNull(iconRv)
+    assertEquals(R.layout.widget_large_icon, iconRv!!.layoutId)
   }
 }

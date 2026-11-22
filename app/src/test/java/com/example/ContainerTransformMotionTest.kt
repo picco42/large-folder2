@@ -195,10 +195,11 @@ class ContainerTransformMotionTest {
         assertTrue(closeSpring.stiffness > openSpring.stiffness)
         assertEquals(1.0f, closeSpring.dampingRatio, 0.001f)
 
-        assertEquals(1f, computeContainerAlpha(progress = 0.0f, hasOriginBounds = true, hasMeasuredLayout = true), 0.001f)
+        assertEquals(0f, computeContainerAlpha(progress = 0.0f, hasOriginBounds = true, hasMeasuredLayout = true), 0.001f)
+        assertEquals(1f, computeContainerAlpha(progress = 0.08f, hasOriginBounds = true, hasMeasuredLayout = true), 0.001f)
         assertEquals(1f, computeContainerAlpha(progress = 0.5f, hasOriginBounds = true, hasMeasuredLayout = true), 0.001f)
         assertEquals(1f, computeCompactContentAlpha(progress = 0.0f, hasOriginBounds = true), 0.001f)
-        assertEquals(0f, computeExpandedContentAlpha(progress = 0.28f), 0.001f)
+        assertEquals(0f, computeExpandedContentAlpha(progress = 0.45f), 0.001f)
         assertEquals(1f, computeExpandedContentAlpha(progress = 0.85f), 0.001f)
 
         for (step in 0..100) {
@@ -228,11 +229,13 @@ class ContainerTransformMotionTest {
             hasOriginBounds = true,
             hasMeasuredLayout = true,
             preCollapseScale = 1f,
-            preCollapseOffset = Offset.Zero
+            preCollapseOffset = Offset.Zero,
+            isTransitioning = true
         )
-        assertEquals(1f, endFrame.containerAlpha, 0.001f)
+        assertEquals(0f, endFrame.containerAlpha, 0.001f)
         assertEquals(1f, endFrame.compactAlpha, 0.001f)
         assertEquals(0f, endFrame.expandedAlpha, 0.001f)
+        assertEquals(1f, endFrame.occlusionAlpha, 0.001f)
         assertEquals(24f, endFrame.cornerRadiusRxPx * endFrame.scaleX, 0.01f)
         assertEquals(24f, endFrame.cornerRadiusRyPx * endFrame.scaleY, 0.01f)
 
@@ -240,13 +243,13 @@ class ContainerTransformMotionTest {
         assertEquals(1f, computeContainerAlpha(0.30f, hasOriginBounds = false, hasMeasuredLayout = true), 0.001f)
         assertEquals(0f, computeContainerAlpha(0.0f, hasOriginBounds = false, hasMeasuredLayout = true), 0.001f)
 
-        // Temporary Surface occlusion shield stays transparent for frosted glass above 0.55f,
-        // solidifies for compact handoff between 0.55f..0.40f, and releases at 0.0f
+        // Temporary Surface occlusion shield stays transparent for frosted glass while settled (>=0.82f),
+        // ramps to solid (0.82f -> 0.50f) before underlying widget icons/3-dots sharpen, and stays 1f down to 0.0f
         assertEquals(0f, computeOcclusionAlpha(progress = 1.0f, isTransitioning = false), 0.001f)
-        assertEquals(0f, computeOcclusionAlpha(progress = 0.60f, isTransitioning = true), 0.001f)
-        assertEquals(1f, computeOcclusionAlpha(progress = 0.30f, isTransitioning = true), 0.001f)
+        assertEquals(0f, computeOcclusionAlpha(progress = 0.85f, isTransitioning = true), 0.001f)
+        assertEquals(1f, computeOcclusionAlpha(progress = 0.45f, isTransitioning = true), 0.001f)
         assertEquals(1f, computeOcclusionAlpha(progress = 0.10f, isTransitioning = true), 0.001f)
-        assertEquals(0f, computeOcclusionAlpha(progress = 0.0f, isTransitioning = true), 0.001f)
+        assertEquals(1f, computeOcclusionAlpha(progress = 0.0f, isTransitioning = true), 0.001f)
     }
 
     @Test
@@ -1044,5 +1047,105 @@ class ContainerTransformMotionTest {
         assertTrue(summary.backDragFrameCount >= 3)
         assertTrue(logLines.any { it.contains("BACK_GESTURE_PROGRESS") })
         assertTrue(logLines.any { it.contains("[SESSION_SUMMARY") })
+    }
+
+    @Test
+    fun `keepComposedUntilHostFinishes retains compact and expanded nodes after collapse completes`() {
+        var dismissCompletedCount = 0
+        var requestDismissCount = 0
+        var trigger by mutableStateOf(0)
+
+        composeRule.setContent {
+            FolderWidgetTheme {
+                CompositionLocalProvider(LocalOnBackPressedDispatcherOwner provides composeRule.activity) {
+                    SharedContainerTransformOverlay(
+                        originBounds = Rect(40f, 100f, 200f, 260f),
+                        originBoundsAreScreenCoords = false,
+                        originCornerRadiusDp = 24f,
+                        hasExactOrCachedOrigin = true,
+                        cardBgColor = Color(0xFF1E293B),
+                        cardBorderColor = Color.White.copy(alpha = 0.2f),
+                        externalDismissTrigger = trigger,
+                        onRequestDismiss = {
+                            requestDismissCount++
+                            if (requestDismissCount == 1) trigger++
+                        },
+                        keepComposedUntilHostFinishes = true,
+                        onDismissCompleted = { dismissCompletedCount++ },
+                        compactContent = { Text("CompactNode", modifier = Modifier.testTag("kept_compact")) },
+                        expandedContent = { _, _ -> Text("ExpandedNode", modifier = Modifier.testTag("kept_expanded")) }
+                    )
+                }
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.runOnUiThread {
+            // Double back press must guard cleanly and invoke finish only once
+            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeRule.waitForIdle()
+        assertEquals(1, dismissCompletedCount)
+        assertEquals(
+            1,
+            composeRule.onAllNodes(
+                androidx.compose.ui.test.hasTestTag("kept_compact"),
+                useUnmergedTree = true
+            ).fetchSemanticsNodes().size
+        )
+        assertEquals(
+            1,
+            composeRule.onAllNodes(
+                androidx.compose.ui.test.hasTestTag("kept_expanded"),
+                useUnmergedTree = true
+            ).fetchSemanticsNodes().size
+        )
+    }
+
+    @Test
+    fun `FolderPopupActivity dismiss() guards double calls and finishes only after animation`() {
+        val db = AppDatabase.getDatabase(context)
+        val folderId = runBlocking {
+            db.folderDao().insertFolder(
+                FolderEntity(name = "Quick", layoutType = FolderLayouts.GRID_2X2)
+            )
+        }
+        val intent = Intent(context, FolderPopupActivity::class.java).apply {
+            putExtra(FolderWidgetProvider.EXTRA_FOLDER_ID, folderId)
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, 606)
+            sourceBounds = AndroidRect(40, 100, 240, 300)
+        }
+
+        val scenario = androidx.test.core.app.ActivityScenario.launch<FolderPopupActivity>(intent)
+        try {
+            composeRule.waitForIdle()
+            composeRule.mainClock.autoAdvance = false
+            scenario.onActivity { activity ->
+                assertFalse(activity.isFinishing)
+                // First dismiss starts collapse animation; second call must be ignored by guard
+                activity.dismiss()
+                activity.dismiss()
+                assertFalse("finish() must wait until collapse animation finishes", activity.isFinishing)
+            }
+
+            // Mid-collapse (~32ms into ~250ms critically damped spring): must still be composing & NOT finished
+            composeRule.mainClock.advanceTimeBy(32)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            scenario.onActivity { activity ->
+                assertFalse("finish() must not run before collapse animation ends", activity.isFinishing)
+            }
+
+            // Finish remaining collapse animation frames
+            composeRule.mainClock.autoAdvance = true
+            composeRule.waitForIdle()
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            scenario.onActivity { activity ->
+                assertTrue("Activity should call finish() once collapse completes", activity.isFinishing)
+            }
+        } finally {
+            composeRule.mainClock.autoAdvance = true
+            scenario.close()
+        }
     }
 }

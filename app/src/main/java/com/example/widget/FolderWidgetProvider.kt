@@ -19,6 +19,7 @@ import com.example.data.FolderLayouts
 import com.example.popup.FolderPopupActivity
 import com.example.popup.PopupSessionCoordinator
 import com.example.util.AppScanner
+import com.example.util.IconStyleManager
 import com.example.util.WidgetBoundsCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,11 @@ class FolderWidgetProvider : AppWidgetProvider() {
         appWidgetIds: IntArray
     ) {
         PopupSessionCoordinator.dismissStaleAwaitingPopup("widget_update")
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(
+            context = context,
+            triggerWidgetUpdate = true,
+            skipProviderClass = FolderWidgetProvider::class.java
+        )
         val db = AppDatabase.getDatabase(context)
         CoroutineScope(Dispatchers.IO).launch {
             for (widgetId in appWidgetIds) {
@@ -66,6 +72,11 @@ class FolderWidgetProvider : AppWidgetProvider() {
     ) {
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
         PopupSessionCoordinator.dismissStaleAwaitingPopup("widget_options_changed")
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(
+            context = context,
+            triggerWidgetUpdate = true,
+            skipProviderClass = FolderWidgetProvider::class.java
+        )
         val db = AppDatabase.getDatabase(context)
         CoroutineScope(Dispatchers.IO).launch {
             val binding = db.widgetBindingDao().getBinding(appWidgetId)
@@ -327,43 +338,79 @@ class FolderWidgetProvider : AppWidgetProvider() {
             apps: List<com.example.data.FolderAppEntity>
         ): RemoteViews? {
             return try {
-                val views = RemoteViews(context.packageName, R.layout.widget_folder_preview)
+                val layoutRes = when (folder.layoutType) {
+                    FolderLayouts.GRID_2X2 -> R.layout.widget_folder_2x2
+                    FolderLayouts.ROW_1X2 -> R.layout.widget_folder_1x2
+                    FolderLayouts.ROW_1X4 -> R.layout.widget_folder_1x4
+                    else -> R.layout.widget_folder_3x3
+                }
+                val maxSlots = when (folder.layoutType) {
+                    FolderLayouts.GRID_2X2 -> 4
+                    FolderLayouts.ROW_1X2 -> 2
+                    FolderLayouts.ROW_1X4 -> 4
+                    else -> 9
+                }
+                val views = RemoteViews(context.packageName, layoutRes)
+
                 val bgRes = when (folder.bgStyle) {
                     FolderBgStyles.FROSTED_LIGHT -> R.drawable.widget_bg_frosted_light
                     FolderBgStyles.DYNAMIC -> R.drawable.widget_bg_dynamic
                     FolderBgStyles.CLEAR -> R.drawable.widget_bg_clear
                     else -> R.drawable.widget_bg_frosted_dark
                 }
-                views.setInt(R.id.preview_card, "setBackgroundResource", bgRes)
+                views.setInt(android.R.id.background, "setBackgroundResource", bgRes)
 
-                val slotIds = intArrayOf(
-                    R.id.preview_slot_1,
-                    R.id.preview_slot_2,
-                    R.id.preview_slot_3,
-                    R.id.preview_slot_4
-                )
-                val hasOverflow = apps.size > 4
-                for (i in slotIds.indices) {
-                    val slotViewId = slotIds[i]
-                    if (i == 3 && hasOverflow) {
+                if (folder.showLabels) {
+                    views.setViewVisibility(R.id.widget_folder_name, View.VISIBLE)
+                    views.setTextViewText(R.id.widget_folder_name, folder.name)
+                } else {
+                    views.setViewVisibility(R.id.widget_folder_name, View.GONE)
+                }
+
+                views.setViewVisibility(R.id.overflow_slot, View.GONE)
+
+                // Small bitmaps only so Binder IPC Parcel stays safely within launcher limits
+                val smallIconPx = if (folder.layoutType == FolderLayouts.GRID_3X3) 48 else 64
+                val hasOverflow = apps.size > maxSlots
+
+                for (i in 0 until maxSlots) {
+                    val slotIndex = i + 1
+                    val slotId = context.resources.getIdentifier("slot_$slotIndex", "id", context.packageName)
+                    val iconId = context.resources.getIdentifier("slot_icon_$slotIndex", "id", context.packageName)
+                    if (slotId == 0 || iconId == 0) continue
+
+                    val isOverflowSlot = hasOverflow && slotIndex == maxSlots
+                    if (isOverflowSlot) {
                         val dotsRes = when (folder.bgStyle) {
                             FolderBgStyles.DYNAMIC -> R.drawable.ic_more_dots_dynamic
                             FolderBgStyles.FROSTED_LIGHT -> R.drawable.ic_more_dots_dark
                             else -> R.drawable.ic_more_dots
                         }
-                        views.setImageViewResource(slotViewId, dotsRes)
-                        views.setViewVisibility(slotViewId, View.VISIBLE)
-                    } else if (i < apps.size) {
+                        views.setViewVisibility(slotId, View.GONE)
+                        views.setImageViewResource(R.id.overflow_slot_icon, dotsRes)
+                        views.setViewVisibility(R.id.overflow_slot_icon, View.VISIBLE)
+                        views.setViewVisibility(R.id.overflow_slot, View.VISIBLE)
+                        continue
+                    }
+
+                    if (i < apps.size) {
                         val app = apps[i]
-                        val bmp = AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 84)
+                        val bmp = AppScanner.getAppIconBitmap(
+                            context,
+                            app.packageName,
+                            app.activityName,
+                            smallIconPx
+                        )
                         if (bmp != null) {
-                            views.setImageViewBitmap(slotViewId, bmp)
-                            views.setViewVisibility(slotViewId, View.VISIBLE)
+                            views.setImageViewBitmap(iconId, bmp)
+                            views.setViewVisibility(iconId, View.VISIBLE)
                         } else {
-                            views.setViewVisibility(slotViewId, View.INVISIBLE)
+                            views.setImageViewResource(iconId, R.mipmap.ic_launcher)
+                            views.setViewVisibility(iconId, View.VISIBLE)
                         }
+                        views.setViewVisibility(slotId, View.VISIBLE)
                     } else {
-                        views.setViewVisibility(slotViewId, View.INVISIBLE)
+                        views.setViewVisibility(slotId, View.INVISIBLE)
                     }
                 }
                 views

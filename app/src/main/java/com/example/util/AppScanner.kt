@@ -4,7 +4,7 @@ import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
+import android.content.pm.LauncherApps
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
@@ -12,17 +12,19 @@ import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffColorFilter
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.os.Process
+import android.os.UserManager
 import android.provider.Settings
 import android.util.LruCache
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 data class AppInfo(
@@ -33,7 +35,7 @@ data class AppInfo(
 
 object AppScanner {
 
-    // Cache downscaled bitmaps for widget RemoteViews (max 180 icons)
+    // Cache downscaled bitmaps for widget RemoteViews & popups (max 180 icons)
     private val iconCache = object : LruCache<String, Bitmap>(180) {}
 
     // Cache full-bleed Large Icon widget bitmaps by KB (max 12 MB)
@@ -41,6 +43,28 @@ object AppScanner {
         override fun sizeOf(key: String, value: Bitmap): Int {
             return (value.allocationByteCount / 1024).coerceAtLeast(1)
         }
+    }
+
+    @Volatile
+    private var cachedUserKey: String? = null
+
+    fun clearBitmapCaches() {
+        iconCache.evictAll()
+        largeIconCache.evictAll()
+    }
+
+    private fun getUserKey(context: Context): String {
+        cachedUserKey?.let { return it }
+        val userHandle = Process.myUserHandle()
+        val serial = try {
+            val um = context.getSystemService(Context.USER_SERVICE) as? UserManager
+            um?.getSerialNumberForUser(userHandle)
+        } catch (_: Exception) {
+            null
+        }
+        val key = "u${serial ?: userHandle.hashCode()}"
+        cachedUserKey = key
+        return key
     }
 
     /**
@@ -96,6 +120,21 @@ object AppScanner {
     }
 
     fun getAppIconDrawable(context: Context, packageName: String, activityName: String? = null): Drawable? {
+        try {
+            val launcherApps = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as? LauncherApps
+            if (launcherApps != null) {
+                val activityList = launcherApps.getActivityList(packageName, Process.myUserHandle())
+                val matched = if (!activityName.isNullOrEmpty()) {
+                    activityList.firstOrNull { it.componentName.className == activityName }
+                } else null
+                val chosen = matched ?: activityList.firstOrNull()
+                val launcherDrawable = chosen?.getIcon(0)
+                if (launcherDrawable != null) return launcherDrawable
+            }
+        } catch (_: Exception) {
+            // Fall back cleanly to PackageManager
+        }
+
         val pm = context.packageManager
         if (!activityName.isNullOrEmpty()) {
             try {
@@ -108,13 +147,13 @@ object AppScanner {
                 }
                 val drawable = activityInfo.loadIcon(pm)
                 if (drawable != null) return drawable
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Fallback to application icon
             }
         }
         return try {
             pm.getApplicationIcon(packageName)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -126,9 +165,10 @@ object AppScanner {
         sizePx: Int
     ): String {
         val themeSig = if (context != null) {
-            val dark = if (isDarkMode(context)) "D" else "L"
-            val palette = if (isColorPaletteActive(context)) "P" else "N"
-            "$dark$palette"
+            val sig = IconStyleManager.getCurrentThemeSignature(context)
+            val userKey = getUserKey(context)
+            val night = if (sig.isDarkMode) "D" else "L"
+            "$userKey:${sig.style.prefValue}:$night:${sig.bgColor}:${sig.fgColor}"
         } else {
             "DEF"
         }
@@ -172,64 +212,76 @@ object AppScanner {
         return getAppIconBitmap(context, packageName, null, sizePx)
     }
 
+    suspend fun prewarmAppIcons(
+        context: Context,
+        apps: List<Pair<String, String?>>,
+        sizePx: Int
+    ) {
+        if (apps.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            for ((pkg, activity) in apps) {
+                getAppIconBitmap(context, pkg, activity, sizePx)
+            }
+        }
+    }
+
     /**
-     * Renders adaptive and legacy drawables safely, properly handling Samsung One UI Color Palette,
-     * Material You themed icons, and monochrome layers to avoid blank icons.
+     * Renders adaptive and legacy drawables safely, preserving the device adaptive icon mask shape
+     * and applying [themedIcon] when [IconStyle.THEMED] is selected on API 33+.
      */
     fun renderIconBitmap(context: Context, drawable: Drawable, sizePx: Int): Bitmap {
-        if (drawable is BitmapDrawable && drawable.bitmap != null) {
-            val src = drawable.bitmap
-            if (src.width == sizePx && src.height == sizePx) return src
-            return Bitmap.createScaledBitmap(src, sizePx, sizePx, true)
+        val safeSize = sizePx.coerceAtLeast(1)
+        val style = IconStyleManager.getIconStyle(context)
+        val effectiveDrawable = if (style == IconStyle.THEMED) {
+            themedIcon(context, drawable)
+        } else {
+            drawable
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && drawable is AdaptiveIconDrawable) {
-            val isColorPaletteActive = isColorPaletteActive(context)
-            val monochrome = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                drawable.monochrome
-            } else null
+        if (effectiveDrawable is BitmapDrawable && effectiveDrawable.bitmap != null) {
+            val src = effectiveDrawable.bitmap
+            if (src.width == safeSize && src.height == safeSize) return src
+            return Bitmap.createScaledBitmap(src, safeSize, safeSize, true)
+        }
 
-            // If system has Material You / Color Palette active and app provides monochrome layer
-            if (isColorPaletteActive && monochrome != null) {
-                val themedBitmap = renderThemedAdaptiveIcon(context, monochrome, sizePx)
-                if (themedBitmap != null) return themedBitmap
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && effectiveDrawable is AdaptiveIconDrawable) {
+            val output = Bitmap.createBitmap(safeSize, safeSize, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(output)
+            effectiveDrawable.setBounds(0, 0, safeSize, safeSize)
+            effectiveDrawable.draw(canvas)
+
+            if (!isBitmapBlank(output)) {
+                return output
             }
 
-            // Standard Adaptive Icon render with safety check
-            val output = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(output)
-            drawable.setBounds(0, 0, sizePx, sizePx)
-            drawable.draw(canvas)
-
-            // On some Samsung One UI devices with themed icons, standard layers can draw blank
-            if (isBitmapBlank(output)) {
-                // Fallback 1: If monochrome layer exists, render with dynamic palette
-                if (monochrome != null) {
-                    val themedFallback = renderThemedAdaptiveIcon(context, monochrome, sizePx)
-                    if (themedFallback != null) return themedFallback
+            // Defensive fallback if an OEM/themed adaptive drawable draws blank
+            val fg = effectiveDrawable.foreground
+            if (fg != null) {
+                val fallbackBitmap = Bitmap.createBitmap(safeSize, safeSize, Bitmap.Config.ARGB_8888)
+                val fbCanvas = Canvas(fallbackBitmap)
+                val mask = effectiveDrawable.iconMask
+                if (!mask.isEmpty) {
+                    fbCanvas.clipPath(mask)
                 }
-
-                // Fallback 2: Draw foreground explicitly
-                val fg = drawable.foreground
-                if (fg != null) {
-                    val fallbackBitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-                    val fbCanvas = Canvas(fallbackBitmap)
-                    fg.setBounds(0, 0, sizePx, sizePx)
-                    fg.draw(fbCanvas)
-                    if (!isBitmapBlank(fallbackBitmap)) {
-                        return fallbackBitmap
-                    }
+                val bg = effectiveDrawable.background
+                if (bg != null) {
+                    bg.setBounds(0, 0, safeSize, safeSize)
+                    bg.draw(fbCanvas)
                 }
-            } else {
-                return output
+                val inset = (safeSize * 0.25f).roundToInt()
+                fg.setBounds(-inset, -inset, safeSize + inset, safeSize + inset)
+                fg.draw(fbCanvas)
+                if (!isBitmapBlank(fallbackBitmap)) {
+                    return fallbackBitmap
+                }
             }
         }
 
         // Standard fallback for vector or legacy drawables
-        val output = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val output = Bitmap.createBitmap(safeSize, safeSize, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
-        drawable.setBounds(0, 0, sizePx, sizePx)
-        drawable.draw(canvas)
+        effectiveDrawable.setBounds(0, 0, safeSize, safeSize)
+        effectiveDrawable.draw(canvas)
         return output
     }
 
@@ -308,92 +360,60 @@ object AppScanner {
         var contentBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         var contentCanvas = Canvas(contentBitmap)
 
+        val style = IconStyleManager.getIconStyle(context)
+        val effectiveDrawable = if (style == IconStyle.THEMED) {
+            themedIcon(context, drawable)
+        } else {
+            drawable
+        }
+        val isThemedInstance = effectiveDrawable !== drawable
+
         var rendered = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && drawable is AdaptiveIconDrawable) {
-            val isColorPalette = isColorPaletteActive(context)
-            val monochrome = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                drawable.monochrome
-            } else null
-
-            if (isColorPalette && monochrome != null) {
-                val (bgFill, fgTint) = getDynamicPaletteColors(context)
-                contentCanvas.drawColor(bgFill)
-
-                val monoSide = (effectiveSquare * 1.5f).roundToInt().coerceAtLeast(1)
-                val monoLeft = centerX - monoSide / 2f
-                val monoTop = centerY - monoSide / 2f
-                val monoCopy = monochrome.constantState?.newDrawable()?.mutate() ?: monochrome.mutate()
-                monoCopy.colorFilter = PorterDuffColorFilter(fgTint, PorterDuff.Mode.SRC_IN)
-                monoCopy.setBounds(0, 0, monoSide, monoSide)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && effectiveDrawable is AdaptiveIconDrawable) {
+            val bg = effectiveDrawable.background
+            if (isThemedInstance && bg is ColorDrawable) {
+                contentCanvas.drawColor(bg.color)
+            } else if (bg != null) {
+                // Scale background uniformly to cover full width x height without distortion or bleed edge
+                val bgSide = (longSide * 1.5f).roundToInt().coerceAtLeast(1)
+                val bgLeft = centerX - bgSide / 2f
+                val bgTop = centerY - bgSide / 2f
+                val bgCopy = if (isThemedInstance) bg else (bg.constantState?.newDrawable()?.mutate() ?: bg.mutate())
+                bgCopy.setBounds(0, 0, bgSide, bgSide)
                 contentCanvas.save()
-                contentCanvas.translate(monoLeft, monoTop)
-                monoCopy.draw(contentCanvas)
+                contentCanvas.translate(bgLeft, bgTop)
+                bgCopy.draw(contentCanvas)
                 contentCanvas.restore()
-                if (!isBitmapBlank(contentBitmap)) {
-                    rendered = true
-                }
             }
 
-            if (!rendered) {
-                contentBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                contentCanvas = Canvas(contentBitmap)
+            // Ensure any transparent outer corners/edges are backed cleanly
+            val cornerAlpha = Color.alpha(contentBitmap.getPixel(1.coerceAtMost(w - 1), 1.coerceAtMost(h - 1)))
+            if (bg == null || cornerAlpha < 200) {
+                val fallbackBg = sampleOpaqueEdgeColor(contentBitmap) ?: Color.WHITE
+                val backedBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val backedCanvas = Canvas(backedBitmap)
+                backedCanvas.drawColor(fallbackBg)
+                backedCanvas.drawBitmap(contentBitmap, 0f, 0f, null)
+                contentBitmap = backedBitmap
+                contentCanvas = backedCanvas
+            }
 
-                val bg = drawable.background
-                if (bg != null) {
-                    // Scale background uniformly to cover full width x height without distortion or bleed edge
-                    val bgSide = (longSide * 1.5f).roundToInt().coerceAtLeast(1)
-                    val bgLeft = centerX - bgSide / 2f
-                    val bgTop = centerY - bgSide / 2f
-                    val bgCopy = bg.constantState?.newDrawable()?.mutate() ?: bg.mutate()
-                    bgCopy.setBounds(0, 0, bgSide, bgSide)
-                    contentCanvas.save()
-                    contentCanvas.translate(bgLeft, bgTop)
-                    bgCopy.draw(contentCanvas)
-                    contentCanvas.restore()
-                }
+            val fg = effectiveDrawable.foreground
+            if (fg != null) {
+                // Adaptive icon safe zone is 66% of the 108dp canvas (108/72 = 1.5x scale centered)
+                val fgSide = (effectiveSquare * 1.5f).roundToInt().coerceAtLeast(1)
+                val fgLeft = centerX - fgSide / 2f
+                val fgTop = centerY - fgSide / 2f
+                val fgCopy = if (isThemedInstance) fg else (fg.constantState?.newDrawable()?.mutate() ?: fg.mutate())
+                fgCopy.setBounds(0, 0, fgSide, fgSide)
+                contentCanvas.save()
+                contentCanvas.translate(fgLeft, fgTop)
+                fgCopy.draw(contentCanvas)
+                contentCanvas.restore()
+            }
 
-                // Ensure any transparent outer corners/edges are backed cleanly
-                val cornerAlpha = Color.alpha(contentBitmap.getPixel(1.coerceAtMost(w - 1), 1.coerceAtMost(h - 1)))
-                if (bg == null || cornerAlpha < 200) {
-                    val fallbackBg = sampleOpaqueEdgeColor(contentBitmap) ?: Color.WHITE
-                    val backedBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    val backedCanvas = Canvas(backedBitmap)
-                    backedCanvas.drawColor(fallbackBg)
-                    backedCanvas.drawBitmap(contentBitmap, 0f, 0f, null)
-                    contentBitmap = backedBitmap
-                    contentCanvas = backedCanvas
-                }
-
-                val fg = drawable.foreground
-                if (fg != null) {
-                    val fgSide = (effectiveSquare * 1.5f).roundToInt().coerceAtLeast(1)
-                    val fgLeft = centerX - fgSide / 2f
-                    val fgTop = centerY - fgSide / 2f
-                    val fgCopy = fg.constantState?.newDrawable()?.mutate() ?: fg.mutate()
-                    fgCopy.setBounds(0, 0, fgSide, fgSide)
-                    contentCanvas.save()
-                    contentCanvas.translate(fgLeft, fgTop)
-                    fgCopy.draw(contentCanvas)
-                    contentCanvas.restore()
-                }
-
-                if (!isBitmapBlank(contentBitmap)) {
-                    rendered = true
-                } else if (monochrome != null) {
-                    val (bgFill, fgTint) = getDynamicPaletteColors(context)
-                    contentCanvas.drawColor(bgFill)
-                    val monoSide = (effectiveSquare * 1.5f).roundToInt().coerceAtLeast(1)
-                    val monoLeft = centerX - monoSide / 2f
-                    val monoTop = centerY - monoSide / 2f
-                    val monoCopy = monochrome.constantState?.newDrawable()?.mutate() ?: monochrome.mutate()
-                    monoCopy.colorFilter = PorterDuffColorFilter(fgTint, PorterDuff.Mode.SRC_IN)
-                    monoCopy.setBounds(0, 0, monoSide, monoSide)
-                    contentCanvas.save()
-                    contentCanvas.translate(monoLeft, monoTop)
-                    monoCopy.draw(contentCanvas)
-                    contentCanvas.restore()
-                    rendered = !isBitmapBlank(contentBitmap)
-                }
+            if (!isBitmapBlank(contentBitmap)) {
+                rendered = true
             }
         }
 
@@ -404,8 +424,8 @@ object AppScanner {
             val squareBmp = Bitmap.createBitmap(squareSide, squareSide, Bitmap.Config.ARGB_8888)
             val squareCanvas = Canvas(squareBmp)
 
-            val intrW = drawable.intrinsicWidth
-            val intrH = drawable.intrinsicHeight
+            val intrW = effectiveDrawable.intrinsicWidth
+            val intrH = effectiveDrawable.intrinsicHeight
             val (drawW, drawH) = if (intrW > 0 && intrH > 0) {
                 val scale = minOf(squareSide.toFloat() / intrW, squareSide.toFloat() / intrH)
                 (intrW * scale).roundToInt().coerceAtLeast(1) to (intrH * scale).roundToInt().coerceAtLeast(1)
@@ -414,7 +434,7 @@ object AppScanner {
             }
             val drawLeft = (squareSide - drawW) / 2
             val drawTop = (squareSide - drawH) / 2
-            val copy = drawable.constantState?.newDrawable()?.mutate() ?: drawable.mutate()
+            val copy = if (isThemedInstance) effectiveDrawable else (effectiveDrawable.constantState?.newDrawable()?.mutate() ?: effectiveDrawable.mutate())
             copy.setBounds(drawLeft, drawTop, drawLeft + drawW, drawTop + drawH)
             copy.draw(squareCanvas)
 
@@ -503,48 +523,13 @@ object AppScanner {
         cornerRadiusPx: Float,
         insetPx: Float
     ): String {
-        val dark = if (isDarkMode(context)) "D" else "L"
-        val palette = if (isColorPaletteActive(context)) "P" else "N"
-        return "$packageName:${activityName.orEmpty()}:${widthPx}x$heightPx:${cornerRadiusPx.roundToInt()}:${insetPx.roundToInt()}:$dark$palette"
+        val sig = IconStyleManager.getCurrentThemeSignature(context)
+        val userKey = getUserKey(context)
+        val night = if (sig.isDarkMode) "D" else "L"
+        return "$packageName:${activityName.orEmpty()}:$userKey:${sig.style.prefValue}:$night:${sig.bgColor}:${sig.fgColor}:${widthPx}x$heightPx:${cornerRadiusPx.roundToInt()}:${insetPx.roundToInt()}"
     }
 
-    /**
-     * Renders a Material You / Samsung Color Palette themed icon:
-     * A squircle container filled with dark/light system accent container color,
-     * with the monochrome vector shape centered and tinted with system accent color.
-     */
-    private fun renderThemedAdaptiveIcon(context: Context, monochrome: Drawable, sizePx: Int): Bitmap? {
-        try {
-            val (bgColor, tintColor) = getDynamicPaletteColors(context)
-            val output = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(output)
-
-            // Draw Squircle Container Background
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = bgColor
-            }
-            val cornerRadius = sizePx * 0.28f
-            canvas.drawRoundRect(RectF(0f, 0f, sizePx.toFloat(), sizePx.toFloat()), cornerRadius, cornerRadius, paint)
-
-            // Inset monochrome icon inside the 66% safe zone
-            val inset = (sizePx * 0.18f).toInt()
-            val innerSize = sizePx - (inset * 2)
-
-            val monoCopy = monochrome.mutate()
-            monoCopy.colorFilter = PorterDuffColorFilter(tintColor, PorterDuff.Mode.SRC_IN)
-            monoCopy.setBounds(inset, inset, inset + innerSize, inset + innerSize)
-            monoCopy.draw(canvas)
-
-            return output
-        } catch (e: Exception) {
-            return null
-        }
-    }
-
-    fun isDarkMode(context: Context): Boolean {
-        return (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-    }
+    fun isDarkMode(context: Context): Boolean = IconStyleManager.isDarkMode(context)
 
     fun isColorPaletteActive(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
@@ -568,27 +553,7 @@ object AppScanner {
     }
 
     fun getDynamicPaletteColors(context: Context): Pair<Int, Int> {
-        val darkMode = isDarkMode(context)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                return if (darkMode) {
-                    val bg = context.getColor(android.R.color.system_accent1_800)
-                    val fg = context.getColor(android.R.color.system_accent1_200)
-                    Pair(bg, fg)
-                } else {
-                    val bg = context.getColor(android.R.color.system_accent1_100)
-                    val fg = context.getColor(android.R.color.system_accent1_900)
-                    Pair(bg, fg)
-                }
-            } catch (_: Exception) {
-                // fall through to deterministic fallback pair
-            }
-        }
-        return if (darkMode) {
-            Pair(0xFF3D3617.toInt(), 0xFFDFD59C.toInt())
-        } else {
-            Pair(0xFFE2E8F0.toInt(), 0xFF1E293B.toInt())
-        }
+        return IconStyleManager.resolveThemeColors(context)
     }
 
     private fun isBitmapBlank(bitmap: Bitmap): Boolean {

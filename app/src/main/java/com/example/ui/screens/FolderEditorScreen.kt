@@ -39,6 +39,7 @@ import com.example.ui.components.DockedAppPickerSheet
 import com.example.ui.components.WidgetPreviewCard
 import com.example.util.AppInfo
 import com.example.util.AppScanner
+import com.example.util.rememberIconThemeSignature
 import com.example.util.rememberSystemAnimationScale
 import com.example.util.scaledTweenSpec
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,7 @@ fun FolderEditorScreen(
 ) {
     val context = LocalContext.current
     val animScale = rememberSystemAnimationScale()
+    val themeSignature = rememberIconThemeSignature()
     val installedApps by viewModel.installedApps.collectAsState()
     val isLoadingApps by viewModel.isLoadingApps.collectAsState()
     val allFolders by viewModel.allFolders.collectAsState()
@@ -320,15 +322,14 @@ fun FolderEditorScreen(
                                                     val idx = row * 2 + col
                                                     val appItem = mosaicApps.getOrNull(idx)
                                                     if (appItem != null) {
-                                                        val cached = remember(appItem.packageName, appItem.activityName) {
+                                                        val cached = remember(appItem.packageName, appItem.activityName, themeSignature) {
                                                             AppScanner.getCachedAppIconBitmap(context, appItem.packageName, appItem.activityName, 48)
                                                         }
-                                                        val bmp by produceState(cached, appItem.packageName, appItem.activityName) {
-                                                            if (value == null) {
-                                                                value = withContext(Dispatchers.IO) {
+                                                        val bmp by produceState(cached, appItem.packageName, appItem.activityName, themeSignature) {
+                                                            value = AppScanner.getCachedAppIconBitmap(context, appItem.packageName, appItem.activityName, 48)
+                                                                ?: withContext(Dispatchers.IO) {
                                                                     AppScanner.getAppIconBitmap(context, appItem.packageName, appItem.activityName, 48)
                                                                 }
-                                                            }
                                                         }
                                                         val loaded = bmp
                                                         if (loaded != null) {
@@ -413,15 +414,14 @@ fun FolderEditorScreen(
                         animationSpec = scaledTweenSpec(140, animScale),
                         label = "editorRowDragScale"
                     )
-                    val cachedBitmap = remember(app.packageName, app.activityName) {
+                    val cachedBitmap = remember(app.packageName, app.activityName, themeSignature) {
                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
                     }
-                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName) {
-                        if (value == null) {
-                            value = withContext(Dispatchers.IO) {
+                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName, themeSignature) {
+                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
+                            ?: withContext(Dispatchers.IO) {
                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 96)
                             }
-                        }
                     }
 
                     Card(
@@ -766,6 +766,7 @@ private fun AddAppsSheetContent(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val themeSignature = rememberIconThemeSignature()
     var query by remember { mutableStateOf("") }
     val filtered = remember(installedApps, query) {
         if (query.isBlank()) installedApps
@@ -834,15 +835,14 @@ private fun AddAppsSheetContent(
             ) {
                 items(filtered, key = { it.packageName }) { app ->
                     val isSelected = alreadySelectedPackages.contains(app.packageName)
-                    val cachedBitmap = remember(app.packageName, app.activityName) {
+                    val cachedBitmap = remember(app.packageName, app.activityName, themeSignature) {
                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
                     }
-                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName) {
-                        if (value == null) {
-                            value = withContext(Dispatchers.IO) {
+                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName, themeSignature) {
+                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
+                            ?: withContext(Dispatchers.IO) {
                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 96)
                             }
-                        }
                     }
 
                     Surface(

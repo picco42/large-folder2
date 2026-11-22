@@ -68,6 +68,8 @@ import com.example.ui.motion.SharedContainerTransformOverlay
 import com.example.ui.motion.WindowBlurLifecycleInterceptor
 import com.example.util.AppInfo
 import com.example.util.AppScanner
+import com.example.util.IconThemeSignature
+import com.example.util.rememberIconThemeSignature
 import com.example.util.rememberSystemAnimationScale
 import com.example.util.scaledTweenSpec
 import kotlinx.coroutines.Dispatchers
@@ -93,7 +95,9 @@ fun SamsungFolderPopupOverlay(
     isSystemBlurEnabled: Boolean = false,
     staticBackdropBitmap: Bitmap? = null,
     onBlurProgressChanged: ((Float) -> Unit)? = null,
-    blurLifecycleInterceptor: WindowBlurLifecycleInterceptor? = null
+    blurLifecycleInterceptor: WindowBlurLifecycleInterceptor? = null,
+    onRequestDismiss: (() -> Unit)? = null,
+    keepComposedUntilHostFinishes: Boolean = false
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -106,6 +110,7 @@ fun SamsungFolderPopupOverlay(
     val systemIconSizeDp = with(density) { systemIconSizePx.toDp() }
     val displayIconDp = minOf(systemIconSizeDp, 60.dp).coerceAtLeast(52.dp)
     val iconCornerRadius = (displayIconDp * 0.25f).coerceAtLeast(12.dp)
+    val themeSignature = rememberIconThemeSignature()
 
     // Inline folder title rename state
     var isEditingTitle by remember { mutableStateOf(false) }
@@ -170,14 +175,10 @@ fun SamsungFolderPopupOverlay(
     val overflowCircleColor = blurColors.overflowCircleColor
     val opaqueSurfaceColor = blurColors.opaqueCollapseShield
 
-    // Ensure compact snapshot icons (first 9 slots) are warm in LruCache before collapse begins
-    LaunchedEffect(localApps, systemIconSizePx) {
-        val compactApps = localApps.take(9)
-        withContext(Dispatchers.IO) {
-            for (app in compactApps) {
-                AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
-            }
-        }
+    // Ensure compact snapshot and popup icons are warm in LruCache off main thread
+    LaunchedEffect(localApps, systemIconSizePx, themeSignature) {
+        val pairs = localApps.map { it.packageName to it.activityName }
+        AppScanner.prewarmAppIcons(context, pairs, systemIconSizePx)
     }
 
     val titleSlidePx = with(density) { 14.dp.toPx() }
@@ -218,6 +219,8 @@ fun SamsungFolderPopupOverlay(
                 else -> false
             }
         },
+        onRequestDismiss = onRequestDismiss,
+        keepComposedUntilHostFinishes = keepComposedUntilHostFinishes,
         onDismissCompleted = onDismiss,
         overlayTestTag = "samsung_popup_surface_layer",
         cardTestTag = "samsung_expanded_card",
@@ -344,6 +347,7 @@ fun SamsungFolderPopupOverlay(
                 apps = localApps,
                 systemIconSizePx = systemIconSizePx,
                 systemIconSizeDp = systemIconSizeDp,
+                themeSignature = themeSignature,
                 iconTintColor = contentColor,
                 overflowCircleColor = overflowCircleColor
             )
@@ -481,20 +485,20 @@ fun SamsungFolderPopupOverlay(
                                         animationSpec = scaledTweenSpec(140, animScale),
                                         label = "dragScale"
                                     )
-                                    val cachedBitmap = remember(app.packageName, app.activityName, systemIconSizePx) {
+                                    val cachedBitmap = remember(app.packageName, app.activityName, systemIconSizePx, themeSignature) {
                                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                     }
                                     val iconBitmap by produceState(
                                         initialValue = cachedBitmap,
-                                        key1 = app.packageName,
-                                        key2 = app.activityName,
-                                        key3 = systemIconSizePx
+                                        app.packageName,
+                                        app.activityName,
+                                        systemIconSizePx,
+                                        themeSignature
                                     ) {
-                                        if (value == null) {
-                                            value = withContext(Dispatchers.IO) {
+                                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
+                                            ?: withContext(Dispatchers.IO) {
                                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                             }
-                                        }
                                     }
                                     var iconWindowRect by remember { mutableStateOf<AndroidRect?>(null) }
 
@@ -536,7 +540,6 @@ fun SamsungFolderPopupOverlay(
                                         Box(
                                             modifier = Modifier
                                                 .size(displayIconDp)
-                                                .clip(RoundedCornerShape(iconCornerRadius))
                                                 .onGloballyPositioned { coords ->
                                                     if (coords.isAttached) {
                                                         val b = coords.boundsInWindow()
@@ -654,6 +657,7 @@ private fun CompactFolderWidgetSnapshot(
     apps: List<FolderAppEntity>,
     systemIconSizePx: Int,
     systemIconSizeDp: androidx.compose.ui.unit.Dp,
+    themeSignature: IconThemeSignature,
     iconTintColor: Color,
     overflowCircleColor: Color
 ) {
@@ -716,15 +720,14 @@ private fun CompactFolderWidgetSnapshot(
                             } else {
                                 val app = apps.getOrNull(idx)
                                 if (app != null) {
-                                    val cached = remember(app.packageName, app.activityName, systemIconSizePx) {
+                                    val cached = remember(app.packageName, app.activityName, systemIconSizePx, themeSignature) {
                                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                     }
-                                    val bmp by produceState(cached, app.packageName, app.activityName, systemIconSizePx) {
-                                        if (value == null) {
-                                            value = withContext(Dispatchers.IO) {
+                                    val bmp by produceState(cached, app.packageName, app.activityName, systemIconSizePx, themeSignature) {
+                                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
+                                            ?: withContext(Dispatchers.IO) {
                                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                             }
-                                        }
                                     }
                                     val loaded = bmp
                                     if (loaded != null) {
@@ -760,6 +763,7 @@ private fun QuickAddAppsSheet(
     onDone: () -> Unit
 ) {
     val context = LocalContext.current
+    val themeSignature = rememberIconThemeSignature()
     var query by remember { mutableStateOf("") }
     val filtered = remember(installedApps, query) {
         if (query.isBlank()) installedApps
@@ -831,15 +835,14 @@ private fun QuickAddAppsSheet(
             ) {
                 items(filtered, key = { it.packageName }) { app ->
                     val isSelected = app.packageName in selectedPackages
-                    val cachedBitmap = remember(app.packageName, app.activityName) {
+                    val cachedBitmap = remember(app.packageName, app.activityName, themeSignature) {
                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
                     }
-                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName) {
-                        if (value == null) {
-                            value = withContext(Dispatchers.IO) {
+                    val iconBitmap by produceState(cachedBitmap, app.packageName, app.activityName, themeSignature) {
+                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 96)
+                            ?: withContext(Dispatchers.IO) {
                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 96)
                             }
-                        }
                     }
 
                     Surface(

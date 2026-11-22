@@ -6,8 +6,10 @@ import android.content.Intent
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
@@ -27,12 +29,16 @@ import com.example.ui.motion.FolderBlurSpec
 import com.example.ui.motion.WindowBlurLifecycleInterceptor
 import com.example.ui.theme.FolderWidgetTheme
 import com.example.util.AppScanner
+import com.example.util.IconStyleManager
 import com.example.util.OriginSourceKind
 import com.example.util.WidgetBoundsCache
 import com.example.widget.FolderWidgetProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.function.Consumer
 import kotlin.math.roundToInt
 
@@ -55,6 +61,9 @@ class FolderPopupActivity : ComponentActivity() {
     private var blurEnabledListener: Consumer<Boolean>? = null
     private var isLaunchingApp = false
     private var awaitingAppReturn = false
+    private var isDismissInFlight = false
+    private var hasFinished = false
+    private var isPopupComposed = false
     private val blurInterceptor = WindowBlurLifecycleInterceptor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +76,10 @@ class FolderPopupActivity : ComponentActivity() {
         maxWindowBlurRadiusPx = FolderBlurSpec.maxBlurRadiusPx(Density(this))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             isSystemBlurEnabledState = windowManager.isCrossWindowBlurEnabled
+            Log.d(TAG, "onCreate: windowManager.isCrossWindowBlurEnabled=$isSystemBlurEnabledState")
+            if (isSystemBlurEnabledState) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            }
             applyWindowBackgroundBlur(0)
         }
 
@@ -93,6 +106,10 @@ class FolderPopupActivity : ComponentActivity() {
 
         setContent {
             FolderWidgetTheme {
+                BackHandler(enabled = true) {
+                    dismiss()
+                }
+
                 val activeFolderId = folderIdState
                 val maxBlurRadiusPx = FolderBlurSpec.maxBlurRadiusPx(LocalDensity.current)
                 SideEffect {
@@ -116,10 +133,17 @@ class FolderPopupActivity : ComponentActivity() {
 
                 folder?.let { currentFolder ->
                     key(currentFolder.id, appWidgetIdState, openGeneration) {
+                        DisposableEffect(currentFolder.id, appWidgetIdState, openGeneration) {
+                            isPopupComposed = true
+                            onDispose {
+                                isPopupComposed = false
+                            }
+                        }
+
                         SamsungFolderPopupOverlay(
                             folder = currentFolder,
                             apps = apps,
-                            onDismiss = { dismissCleanly() },
+                            onDismiss = { finishAfterAnimation() },
                             onLaunchApp = { app, iconRect ->
                                 val launchIntent = AppScanner.getLaunchIntent(
                                     this@FolderPopupActivity,
@@ -149,7 +173,7 @@ class FolderPopupActivity : ComponentActivity() {
                                 } else {
                                     awaitingAppReturn = false
                                     PopupSessionCoordinator.clearAwaitingAppReturn(this@FolderPopupActivity)
-                                    dismissCleanly()
+                                    dismiss()
                                 }
                             },
                             onReorderApps = { reorderedApps ->
@@ -184,7 +208,9 @@ class FolderPopupActivity : ComponentActivity() {
                                     commitToWindow = ::commitRawWindowBackgroundBlur
                                 )
                             },
-                            blurLifecycleInterceptor = blurInterceptor
+                            blurLifecycleInterceptor = blurInterceptor,
+                            onRequestDismiss = { dismiss() },
+                            keepComposedUntilHostFinishes = true
                         )
                     }
                 } ?: Box(modifier = Modifier.fillMaxSize())
@@ -245,17 +271,14 @@ class FolderPopupActivity : ComponentActivity() {
 
     override fun onRestart() {
         super.onRestart()
-        if (awaitingAppReturn && !isFinishing) {
+        if (awaitingAppReturn && !isFinishing && !isDestroyed) {
             val currentConfigKey = WidgetBoundsCache.buildDisplayConfigKey(this)
             if (originConfigKeyState.isNotEmpty() && originConfigKeyState != currentConfigKey) {
                 // Orientation/display changed while in external app: invalidate stale origin so collapse
                 // safely centers at the widget's known size instead of shrinking into wrong coordinates.
                 resolveOriginBounds(intentSourceBounds = null)
             }
-            isLaunchingApp = false
-            awaitingAppReturn = false
-            PopupSessionCoordinator.clearAwaitingAppReturn(this)
-            returnDismissTrigger++
+            dismiss()
         }
     }
 
@@ -267,6 +290,8 @@ class FolderPopupActivity : ComponentActivity() {
         PopupSessionCoordinator.clearAwaitingAppReturn(this)
         isLaunchingApp = false
         awaitingAppReturn = false
+        isDismissInFlight = false
+        hasFinished = false
         externalDismissTrigger = 0
         returnDismissTrigger = 0
         lastBlurProgress = 0f
@@ -309,23 +334,42 @@ class FolderPopupActivity : ComponentActivity() {
     }
 
     private fun loadFolderDataSynchronously(folderId: Long) {
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(this, triggerWidgetUpdate = true)
         val repository = (application as FolderWidgetApplication).repository
         if (folderId != -1L) {
+            val iconSizePx = AppScanner.getSystemHomeIconSizePx(this)
             val pair = runBlocking(Dispatchers.IO) {
-                repository.getFolderById(folderId) to repository.getAppsForFolderSync(folderId)
+                val folderAndApps = repository.getFolderById(folderId) to repository.getAppsForFolderSync(folderId)
+                val firstPageApps = folderAndApps.second.take(16)
+                if (firstPageApps.isNotEmpty()) {
+                    withTimeoutOrNull(60L) {
+                        firstPageApps.map { app ->
+                            async(Dispatchers.IO) {
+                                AppScanner.getAppIconBitmap(
+                                    this@FolderPopupActivity,
+                                    app.packageName,
+                                    app.activityName,
+                                    iconSizePx
+                                )
+                            }
+                        }.awaitAll()
+                    }
+                }
+                folderAndApps
             }
             preloadedFolderState = pair.first
             preloadedAppsState = pair.second
-            val iconSizePx = AppScanner.getSystemHomeIconSizePx(this)
-            val appsToPrewarm = pair.second.take(16)
-            lifecycleScope.launch(Dispatchers.IO) {
-                for (app in appsToPrewarm) {
-                    AppScanner.getAppIconBitmap(
-                        this@FolderPopupActivity,
-                        app.packageName,
-                        app.activityName,
-                        iconSizePx
-                    )
+            val allApps = pair.second
+            if (allApps.isNotEmpty()) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    for (app in allApps) {
+                        AppScanner.getAppIconBitmap(
+                            this@FolderPopupActivity,
+                            app.packageName,
+                            app.activityName,
+                            iconSizePx
+                        )
+                    }
                 }
             }
         } else {
@@ -336,8 +380,10 @@ class FolderPopupActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(this, triggerWidgetUpdate = true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             isSystemBlurEnabledState = windowManager.isCrossWindowBlurEnabled
+            Log.d(TAG, "onStart: windowManager.isCrossWindowBlurEnabled=$isSystemBlurEnabledState")
             lastAppliedBlurRadiusPx = blurInterceptor.recordSystemBlurAvailabilityChanged(
                 enabled = isSystemBlurEnabledState,
                 lastBlurProgress = lastBlurProgress,
@@ -348,6 +394,7 @@ class FolderPopupActivity : ComponentActivity() {
             )
             if (blurEnabledListener == null) {
                 val listener = Consumer<Boolean> { enabled ->
+                    Log.d(TAG, "onCrossWindowBlurEnabledChanged: isCrossWindowBlurEnabled=$enabled")
                     isSystemBlurEnabledState = enabled
                     lastAppliedBlurRadiusPx = blurInterceptor.recordSystemBlurAvailabilityChanged(
                         enabled = enabled,
@@ -366,8 +413,8 @@ class FolderPopupActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (!isLaunchingApp && !awaitingAppReturn && !isFinishing) {
-            externalDismissTrigger++
+        if (!isLaunchingApp && !awaitingAppReturn && !isFinishing && !isDestroyed) {
+            dismiss()
         }
     }
 
@@ -379,8 +426,8 @@ class FolderPopupActivity : ComponentActivity() {
                 blurEnabledListener = null
             }
         }
-        if (externalDismissTrigger > 0 && !awaitingAppReturn && !isFinishing) {
-            dismissCleanly()
+        if (isDismissInFlight && !awaitingAppReturn && !hasFinished && !isFinishing && !isDestroyed) {
+            finishAfterAnimation()
         }
     }
 
@@ -399,12 +446,27 @@ class FolderPopupActivity : ComponentActivity() {
 
     private fun configureTranslucentBlurWindow() {
         window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
-        window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            window.setBackgroundBlurRadius(0)
+        }
     }
 
     private fun commitRawWindowBackgroundBlur(clampedPx: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            window.setBackgroundBlurRadius(clampedPx)
+            val lp = window.attributes
+            val shouldKeepBehindFlag = isSystemBlurEnabledState && !isFinishing && !isDestroyed
+            val wantFlag = clampedPx > 0 || shouldKeepBehindFlag
+            val hasFlag = (lp.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND) != 0
+            if (wantFlag != hasFlag || lp.blurBehindRadius != clampedPx) {
+                if (wantFlag) {
+                    lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                } else {
+                    lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+                }
+                lp.blurBehindRadius = clampedPx
+                window.attributes = lp
+            }
         }
     }
 
@@ -435,31 +497,57 @@ class FolderPopupActivity : ComponentActivity() {
         }
     }
 
-    internal fun finishStalePopupSilently() {
+    internal fun dismiss() {
+        if (isDismissInFlight || hasFinished || isFinishing || isDestroyed) return
+        isDismissInFlight = true
         isLaunchingApp = false
+        val wasAwaitingAppReturn = awaitingAppReturn
         awaitingAppReturn = false
-        PopupSessionCoordinator.unregisterPopup(this)
-        lastBlurProgress = 0f
-        applyWindowBackgroundBlur(0)
-        blurInterceptor.endSession("STALE_RESTORE")
-        if (!isFinishing && !isDestroyed) {
-            finishAndRemoveTask()
-            disableSystemActivityTransitions()
+        PopupSessionCoordinator.clearAwaitingAppReturn(this)
+
+        if (!isPopupComposed && preloadedFolderState == null) {
+            finishAfterAnimation()
+            return
+        }
+        if (wasAwaitingAppReturn) {
+            returnDismissTrigger++
+        } else {
+            externalDismissTrigger++
         }
     }
 
-    private fun dismissCleanly() {
+    internal fun finishStalePopupSilently() {
+        if (hasFinished || isFinishing || isDestroyed) return
+        hasFinished = true
+        isDismissInFlight = true
         isLaunchingApp = false
         awaitingAppReturn = false
         PopupSessionCoordinator.unregisterPopup(this)
         lastBlurProgress = 0f
         applyWindowBackgroundBlur(0)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        blurInterceptor.endSession("STALE_RESTORE")
+        finish()
+        disableSystemActivityTransitions()
+    }
+
+    private fun finishAfterAnimation() {
+        if (hasFinished || isFinishing || isDestroyed) return
+        hasFinished = true
+        isDismissInFlight = true
+        isLaunchingApp = false
+        awaitingAppReturn = false
+        PopupSessionCoordinator.unregisterPopup(this)
+        lastBlurProgress = 0f
+        applyWindowBackgroundBlur(0)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
         blurInterceptor.endSession("DISMISSED")
-        finishAndRemoveTask()
+        finish()
         disableSystemActivityTransitions()
     }
 
     companion object {
+        private const val TAG = "FolderPopupActivity"
         private const val STATE_FOLDER_ID = "state_folder_id"
         private const val STATE_APPWIDGET_ID = "state_appwidget_id"
         private const val STATE_CONFIG_KEY = "state_config_key"

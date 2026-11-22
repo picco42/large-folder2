@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.LargeIconEntity
 import com.example.data.LargeIconOrientations
 import com.example.util.AppScanner
+import com.example.util.rememberIconThemeSignature
 import com.example.util.rememberSystemAnimationScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -43,6 +44,7 @@ fun LargeIconPreviewCard(
     val context = LocalContext.current
     val density = LocalDensity.current
     val animScale = rememberSystemAnimationScale()
+    val themeSignature = rememberIconThemeSignature()
 
     val (targetWidth, targetHeight) = when (largeIcon.orientation) {
         LargeIconOrientations.ICON_1X2 -> 92.dp to 184.dp
@@ -115,7 +117,8 @@ fun LargeIconPreviewCard(
                     largeIcon.activityName,
                     targetWpx,
                     targetHpx,
-                    insetPx
+                    insetPx,
+                    themeSignature
                 ) {
                     AppScanner.getCachedLargeIconWidgetBitmap(
                         context = context,
@@ -133,7 +136,8 @@ fun LargeIconPreviewCard(
                     largeIcon.activityName,
                     targetWpx,
                     targetHpx,
-                    insetPx
+                    insetPx,
+                    themeSignature
                 ) {
                     value = withContext(Dispatchers.IO) {
                         AppScanner.renderLargeIconWidgetBitmap(

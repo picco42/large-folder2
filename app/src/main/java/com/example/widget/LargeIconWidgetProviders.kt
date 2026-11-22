@@ -16,6 +16,7 @@ import com.example.data.LargeIconOrientations
 import com.example.data.WidgetBindingEntity
 import com.example.data.WidgetItemTypes
 import com.example.util.AppScanner
+import com.example.util.IconStyleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -56,6 +57,11 @@ abstract class BaseLargeIconWidgetProvider(
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray
     ) {
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(
+            context = context,
+            triggerWidgetUpdate = true,
+            skipProviderClass = this::class.java
+        )
         val db = AppDatabase.getDatabase(context)
         CoroutineScope(Dispatchers.IO).launch {
             for (widgetId in appWidgetIds) {
@@ -77,6 +83,11 @@ abstract class BaseLargeIconWidgetProvider(
         newOptions: Bundle
     ) {
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(
+            context = context,
+            triggerWidgetUpdate = true,
+            skipProviderClass = this::class.java
+        )
         val db = AppDatabase.getDatabase(context)
         CoroutineScope(Dispatchers.IO).launch {
             val binding = db.widgetBindingDao().getBinding(appWidgetId)
@@ -259,12 +270,12 @@ abstract class BaseLargeIconWidgetProvider(
 
         fun buildPinPreviewRemoteViews(context: Context, largeIcon: LargeIconEntity): RemoteViews? {
             return try {
-                val (layoutRes, previewW, previewH) = when (largeIcon.orientation) {
-                    LargeIconOrientations.ICON_1X2 -> Triple(R.layout.widget_icon_preview_1x2, 160, 320)
-                    LargeIconOrientations.ICON_2X1 -> Triple(R.layout.widget_icon_preview_2x1, 320, 160)
-                    else -> Triple(R.layout.widget_icon_preview_1x1, 192, 192)
+                val (previewW, previewH) = when (largeIcon.orientation) {
+                    LargeIconOrientations.ICON_1X2 -> 72 to 144
+                    LargeIconOrientations.ICON_2X1 -> 144 to 72
+                    else -> 96 to 96
                 }
-                val views = RemoteViews(context.packageName, layoutRes)
+                val views = RemoteViews(context.packageName, R.layout.widget_large_icon)
                 val shortSide = minOf(previewW, previewH).toFloat()
                 val cornerPx = (largeIcon.cornerRadiusDp / 96f).coerceIn(0f, 0.5f) * shortSide
                 val insetPx = (largeIcon.iconPaddingDp / 96f).coerceIn(0f, 0.30f) * shortSide
@@ -279,8 +290,11 @@ abstract class BaseLargeIconWidgetProvider(
                     insetPx = insetPx
                 )
                 if (bmp != null) {
-                    views.setImageViewBitmap(R.id.large_icon_preview_image, bmp)
+                    views.setImageViewBitmap(R.id.large_icon_image, bmp)
+                } else {
+                    views.setImageViewResource(R.id.large_icon_image, R.mipmap.ic_launcher)
                 }
+                views.setViewVisibility(R.id.large_icon_image, View.VISIBLE)
                 views
             } catch (_: Exception) {
                 null

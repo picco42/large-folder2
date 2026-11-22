@@ -48,6 +48,8 @@ import com.example.data.FolderBgStyles
 import com.example.data.FolderEntity
 import com.example.data.FolderLayouts
 import com.example.util.AppScanner
+import com.example.util.IconThemeSignature
+import com.example.util.rememberIconThemeSignature
 import com.example.util.rememberSystemAnimationScale
 import com.example.util.scaledTweenSpec
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +70,7 @@ fun WidgetPreviewCard(
     val configuration = LocalConfiguration.current
     val haptic = LocalHapticFeedback.current
     val animScale = rememberSystemAnimationScale()
+    val themeSignature = rememberIconThemeSignature()
     val cornerRadius = folder.cornerRadiusDp.dp
     val systemIconSizePx = remember(configuration.densityDpi, configuration.screenLayout) {
         AppScanner.getSystemHomeIconSizePx(context)
@@ -267,6 +270,7 @@ fun WidgetPreviewCard(
                         apps = localApps,
                         systemIconSizePx = systemIconSizePx,
                         systemIconSizeDp = systemIconSizeDp,
+                        themeSignature = themeSignature,
                         animScale = animScale,
                         iconTintColor = iconTintColor,
                         overflowCircleColor = overflowCircleColor,
@@ -281,6 +285,7 @@ fun WidgetPreviewCard(
                         apps = localApps,
                         systemIconSizePx = systemIconSizePx,
                         systemIconSizeDp = systemIconSizeDp,
+                        themeSignature = themeSignature,
                         animScale = animScale,
                         iconTintColor = iconTintColor,
                         overflowCircleColor = overflowCircleColor,
@@ -295,6 +300,7 @@ fun WidgetPreviewCard(
                         apps = localApps,
                         systemIconSizePx = systemIconSizePx,
                         systemIconSizeDp = systemIconSizeDp,
+                        themeSignature = themeSignature,
                         animScale = animScale,
                         iconTintColor = iconTintColor,
                         overflowCircleColor = overflowCircleColor,
@@ -306,6 +312,7 @@ fun WidgetPreviewCard(
                     )
                     else -> PreviewGrid3x3(
                         apps = localApps,
+                        themeSignature = themeSignature,
                         animScale = animScale,
                         iconTintColor = iconTintColor,
                         overflowCircleColor = overflowCircleColor,
@@ -342,6 +349,7 @@ fun WidgetPreviewCard(
 @Composable
 private fun PreviewGrid3x3(
     apps: List<FolderAppEntity>,
+    themeSignature: IconThemeSignature,
     animScale: Float,
     iconTintColor: Color,
     overflowCircleColor: Color,
@@ -422,15 +430,14 @@ private fun PreviewGrid3x3(
                             contentAlignment = Alignment.Center
                         ) {
                             if (app != null) {
-                                val cached = remember(app.packageName, app.activityName) {
+                                val cached = remember(app.packageName, app.activityName, themeSignature) {
                                     AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 120)
                                 }
-                                val bitmap by produceState(cached, app.packageName, app.activityName) {
-                                    if (value == null) {
-                                        value = withContext(Dispatchers.IO) {
+                                val bitmap by produceState(cached, app.packageName, app.activityName, themeSignature) {
+                                    value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, 120)
+                                        ?: withContext(Dispatchers.IO) {
                                             AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, 120)
                                         }
-                                    }
                                 }
                                 val loadedBitmap = bitmap
                                 if (loadedBitmap != null) {
@@ -461,6 +468,7 @@ private fun PreviewGrid2x2(
     apps: List<FolderAppEntity>,
     systemIconSizePx: Int,
     systemIconSizeDp: androidx.compose.ui.unit.Dp,
+    themeSignature: IconThemeSignature,
     animScale: Float,
     iconTintColor: Color,
     overflowCircleColor: Color,
@@ -547,15 +555,14 @@ private fun PreviewGrid2x2(
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (app != null) {
-                                    val cached = remember(app.packageName, app.activityName, systemIconSizePx) {
+                                    val cached = remember(app.packageName, app.activityName, systemIconSizePx, themeSignature) {
                                         AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                     }
-                                    val bitmap by produceState(cached, app.packageName, app.activityName, systemIconSizePx) {
-                                        if (value == null) {
-                                            value = withContext(Dispatchers.IO) {
+                                    val bitmap by produceState(cached, app.packageName, app.activityName, systemIconSizePx, themeSignature) {
+                                        value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
+                                            ?: withContext(Dispatchers.IO) {
                                                 AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                             }
-                                        }
                                     }
                                     val loadedBitmap = bitmap
                                     if (loadedBitmap != null) {
@@ -588,6 +595,7 @@ private fun PreviewRowGrid(
     apps: List<FolderAppEntity>,
     systemIconSizePx: Int,
     systemIconSizeDp: androidx.compose.ui.unit.Dp,
+    themeSignature: IconThemeSignature,
     animScale: Float,
     iconTintColor: Color,
     overflowCircleColor: Color,
@@ -666,15 +674,14 @@ private fun PreviewRowGrid(
                         contentAlignment = Alignment.Center
                     ) {
                         if (app != null) {
-                            val cached = remember(app.packageName, app.activityName, systemIconSizePx) {
+                            val cached = remember(app.packageName, app.activityName, systemIconSizePx, themeSignature) {
                                 AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                             }
-                            val bitmap by produceState(cached, app.packageName, app.activityName, systemIconSizePx) {
-                                if (value == null) {
-                                    value = withContext(Dispatchers.IO) {
+                            val bitmap by produceState(cached, app.packageName, app.activityName, systemIconSizePx, themeSignature) {
+                                value = AppScanner.getCachedAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
+                                    ?: withContext(Dispatchers.IO) {
                                         AppScanner.getAppIconBitmap(context, app.packageName, app.activityName, systemIconSizePx)
                                     }
-                                }
                             }
                             val loadedBitmap = bitmap
                             if (loadedBitmap != null) {

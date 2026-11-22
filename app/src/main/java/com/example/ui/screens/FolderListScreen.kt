@@ -5,6 +5,7 @@ import android.app.ActivityOptions
 import android.graphics.Bitmap
 import android.view.View
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,10 +22,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -33,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.R
 import com.example.data.FolderAppEntity
 import com.example.data.FolderEntity
 import com.example.data.LargeIconEntity
@@ -43,6 +48,8 @@ import com.example.ui.components.LargeIconPreviewCard
 import com.example.ui.components.SamsungFolderPopupOverlay
 import com.example.ui.components.WidgetPreviewCard
 import com.example.util.AppScanner
+import com.example.util.IconStyle
+import com.example.util.IconStyleManager
 import com.example.util.WidgetBoundsCache
 import kotlinx.coroutines.launch
 
@@ -65,8 +72,15 @@ fun FolderListScreen(
     val selectedTab by viewModel.selectedDashboardTab.collectAsState()
 
     var folderToDelete by remember { mutableStateOf<FolderEntity?>(null) }
+    var folderPendingPin by remember { mutableStateOf<FolderEntity?>(null) }
     var largeIconToDelete by remember { mutableStateOf<LargeIconEntity?>(null) }
     var showNewChoiceSheet by remember { mutableStateOf(false) }
+    var showIconStyleDialog by remember { mutableStateOf(false) }
+    val showIconStyleSetting = remember { IconStyleManager.isThemedIconsSupported() }
+    val currentIconStyle by IconStyleManager.iconStyleFlow.collectAsState()
+    LaunchedEffect(context) {
+        IconStyleManager.getIconStyle(context)
+    }
 
     // Expanded Folder & Large Icon in-app overlay states
     var expandedPopupFolderId by remember { mutableStateOf<Long?>(null) }
@@ -125,6 +139,19 @@ fun FolderListScreen(
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold
                         )
+                    },
+                    actions = {
+                        if (showIconStyleSetting) {
+                            IconButton(
+                                onClick = { showIconStyleDialog = true },
+                                modifier = Modifier.testTag("icon_style_settings_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = stringResource(R.string.icon_style_title)
+                                )
+                            }
+                        }
                     },
                     scrollBehavior = scrollBehavior,
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -209,12 +236,7 @@ fun FolderListScreen(
                                 onEdit = { onEditFolder(folder) },
                                 onDelete = { folderToDelete = folder },
                                 onPin = {
-                                    val success = viewModel.requestPinWidget(context, folder, apps)
-                                    if (success) {
-                                        Toast.makeText(context, "Adding '${folder.name}' widget to home screen", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, "Drag 'Large Folder' from your widget drawer", Toast.LENGTH_LONG).show()
-                                    }
+                                    folderPendingPin = folder
                                 }
                             )
                         }
@@ -263,6 +285,86 @@ fun FolderListScreen(
             }
         }
 
+        // In-App Folder Pin Preview Dialog before system requestPinAppWidget
+        folderPendingPin?.let { pendingFolder ->
+            val pendingApps by viewModel.getAppsForFolder(pendingFolder.id).collectAsState(initial = emptyList())
+            AlertDialog(
+                onDismissRequest = { folderPendingPin = null },
+                modifier = Modifier.testTag("pin_folder_preview_dialog"),
+                title = {
+                    Text(
+                        text = "Add to Home screen",
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color(0xFF2D1B4E),
+                                            Color(0xFF1A2238)
+                                        )
+                                    )
+                                )
+                                .padding(horizontal = 16.dp, vertical = 18.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            WidgetPreviewCard(
+                                folder = pendingFolder,
+                                apps = pendingApps
+                            )
+                        }
+                        Text(
+                            text = "Widget preview (${pendingApps.size} apps)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val targetFolder = pendingFolder
+                            val targetApps = pendingApps
+                            folderPendingPin = null
+                            val success = viewModel.requestPinWidget(context, targetFolder, targetApps)
+                            if (success) {
+                                Toast.makeText(context, "Adding '${targetFolder.name}' widget to home screen", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Drag 'Large Folder' from your widget drawer", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("pin_preview_confirm_button")
+                    ) {
+                        Text("Add Widget")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { folderPendingPin = null },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("pin_preview_cancel_button")
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
         // Delete Folder Confirmation Dialog
         folderToDelete?.let { folder ->
             AlertDialog(
@@ -308,6 +410,59 @@ fun FolderListScreen(
                 dismissButton = {
                     TextButton(onClick = { largeIconToDelete = null }) {
                         Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // Icon Style Setting Dialog (API 33+ only; hidden on lower APIs)
+        if (showIconStyleSetting && showIconStyleDialog) {
+            AlertDialog(
+                onDismissRequest = { showIconStyleDialog = false },
+                modifier = Modifier.testTag("icon_style_dialog"),
+                title = {
+                    Text(
+                        text = stringResource(R.string.icon_style_title),
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.icon_style_subtitle),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        IconStyleOptionRow(
+                            title = stringResource(R.string.icon_style_themed),
+                            subtitle = "Use device color palette for monochrome icons",
+                            isSelected = currentIconStyle == IconStyle.THEMED,
+                            onClick = {
+                                IconStyleManager.setIconStyle(context, IconStyle.THEMED)
+                            },
+                            modifier = Modifier.testTag("icon_style_option_themed")
+                        )
+                        IconStyleOptionRow(
+                            title = stringResource(R.string.icon_style_original),
+                            subtitle = "Always show standard app icon artwork",
+                            isSelected = currentIconStyle == IconStyle.ORIGINAL,
+                            onClick = {
+                                IconStyleManager.setIconStyle(context, IconStyle.ORIGINAL)
+                            },
+                            modifier = Modifier.testTag("icon_style_option_original")
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = { showIconStyleDialog = false },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    ) {
+                        Text("Done")
                     }
                 }
             )
@@ -521,6 +676,63 @@ fun FolderListScreen(
                 onEditLargeIcon(icon)
             }
         )
+    }
+}
+
+@Composable
+private fun IconStyleOptionRow(
+    title: String,
+    subtitle: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = if (isSelected) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        },
+        border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+            RadioButton(
+                selected = isSelected,
+                onClick = null
+            )
+        }
     }
 }
 

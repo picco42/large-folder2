@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,6 +21,7 @@ import com.example.ui.screens.FolderEditorScreen
 import com.example.ui.screens.FolderListScreen
 import com.example.ui.screens.LargeIconEditorScreen
 import com.example.ui.theme.FolderWidgetTheme
+import com.example.util.IconStyleManager
 import com.example.util.rememberSystemAnimationScale
 import com.example.util.scaledDurationMs
 
@@ -110,6 +112,12 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         PopupSessionCoordinator.dismissStaleAwaitingPopup("main_activity_resumed")
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(this, triggerWidgetUpdate = true)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        IconStyleManager.syncPaletteAndRefreshIfNeeded(this, triggerWidgetUpdate = true)
     }
 }
 

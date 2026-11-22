@@ -157,17 +157,17 @@ data class ContainerVisualFrame(
 )
 
 /**
- * Temporary opaque surface shield active during the compact-widget handoff phase of open/collapse
- * transitions (`0.04..0.55`) so underlying launcher widget elements (such as the 3-dot overflow
- * menu and icons) cannot bleed through while keeping the upper transition (`>=0.55`) frosted glass.
+ * Temporary opaque Surface shield active during open/collapse transitions (`0.00..0.82`) so the
+ * underlying home-screen widget (3-dots menu & icons) cannot bleed through translucent cardBgColor
+ * as system blur weakens. Stays `1f` through `0.00` while [computeContainerAlpha] fades the entire
+ * card offscreen into the real home-screen widget.
  */
 fun computeOcclusionAlpha(progress: Float, isTransitioning: Boolean): Float {
     if (!isTransitioning) return 0f
     val p = progress.coerceIn(0f, 1f)
     return when {
-        p < 0.04f -> (p / 0.04f).coerceIn(0f, 1f)
-        p <= 0.40f -> 1f
-        p < 0.55f -> ((0.55f - p) / 0.15f).coerceIn(0f, 1f)
+        p <= 0.50f -> 1f
+        p < 0.82f -> ((0.82f - p) / 0.32f).coerceIn(0f, 1f)
         else -> 0f
     }
 }
@@ -213,10 +213,9 @@ fun DeferredComposition(
 
 /**
  * When a concrete widget origin exists (`hasOriginBounds == true`), container geometry tracks
- * spatial `progress` 1:1 and stays opaque (`alpha = 1f`) down to `progress == 0f`.
+ * spatial `progress` 1:1.
  * When no origin bounds exist (centered known-size fallback), `geometryProgress` settles back to
- * the widget's known size by `p = 0.20f`, after which `containerAlpha` fades cleanly to `0f`
- * (mirroring opening without collapsing to a dot).
+ * the widget's known size by `p = 0.20f`, after which `containerAlpha` fades cleanly to `0f`.
  */
 fun computeGeometryProgress(progress: Float, hasOriginBounds: Boolean): Float {
     val p = progress.coerceIn(0f, 1.06f)
@@ -233,38 +232,42 @@ fun computeContainerAlpha(
     hasMeasuredLayout: Boolean
 ): Float {
     if (!hasMeasuredLayout) return 0f
-    if (hasOriginBounds) return 1f
     val clamped = progress.coerceIn(0f, 1f)
-    return (clamped / 0.30f).coerceIn(0f, 1f)
+    return if (hasOriginBounds) {
+        // Hold 1f across travel; fade the whole offscreen-composited card seamlessly over final 8%
+        // onto the real home-screen widget so there is zero double-icon/3-dot ghosting at landing.
+        (clamped / 0.08f).coerceIn(0f, 1f)
+    } else {
+        (clamped / 0.30f).coerceIn(0f, 1f)
+    }
 }
 
 /**
- * Expanded popup grid/chrome fades in late after opening past 42% and fades/scales out early
- * on close (completely invisible by 42% progress before compact widget content appears).
+ * Expanded popup grid/chrome fades in late after opening past 48% and fades out completely by 48%
+ * progress on close before the compact widget snapshot becomes visible.
  */
 fun computeExpandedContentAlpha(progress: Float): Float {
     val clamped = progress.coerceIn(0f, 1f)
-    return ((clamped - 0.42f) / 0.36f).coerceIn(0f, 1f)
+    return ((clamped - 0.48f) / 0.36f).coerceIn(0f, 1f)
 }
 
 fun computeExpandedContentScale(progress: Float): Float {
     val clamped = progress.coerceIn(0f, 1f)
-    val t = ((clamped - 0.40f) / 0.60f).coerceIn(0f, 1f)
+    val t = ((clamped - 0.48f) / 0.52f).coerceIn(0f, 1f)
     return lerp(0.88f, 1.0f, t)
 }
 
 /**
- * Compact widget snapshot is visible (`1f`) at `progress = 0f`, fades out early on open, and
- * fades back in late (`0.36 -> 0.06`) on close so the final frame matches the home-screen widget
- * with zero overlap against expanded content.
+ * Compact widget snapshot is visible (`1f`) below `0.12f` and fades cleanly across `0.36 -> 0.12`,
+ * leaving a dead zone (`0.36..0.48`) against [computeExpandedContentAlpha] so expanded and compact
+ * icons never overlap on screen.
  */
 fun computeCompactContentAlpha(progress: Float, hasOriginBounds: Boolean): Float {
     val clamped = progress.coerceIn(0f, 1f)
     return if (hasOriginBounds) {
-        (1f - ((clamped - 0.06f) / 0.30f)).coerceIn(0f, 1f)
+        (1f - ((clamped - 0.12f) / 0.24f)).coerceIn(0f, 1f)
     } else {
-        // Fallback centered card fades cleanly while never overlapping expanded grid
-        (1f - ((clamped - 0.08f) / 0.30f)).coerceIn(0f, 1f)
+        (1f - ((clamped - 0.12f) / 0.24f)).coerceIn(0f, 1f)
     }
 }
 
@@ -432,6 +435,8 @@ fun SharedContainerTransformOverlay(
     onBlurProgressChanged: ((Float) -> Unit)? = null,
     blurLifecycleInterceptor: WindowBlurLifecycleInterceptor? = null,
     onDismissRequestedBeforeClose: () -> Boolean = { false },
+    onRequestDismiss: (() -> Unit)? = null,
+    keepComposedUntilHostFinishes: Boolean = false,
     onDismissCompleted: () -> Unit,
     overlayTestTag: String = "shared_container_overlay",
     cardTestTag: String = "shared_container_card",
@@ -493,8 +498,10 @@ fun SharedContainerTransformOverlay(
     val currentOnBlurProgressChanged by rememberUpdatedState(onBlurProgressChanged)
     val currentBlurInterceptor by rememberUpdatedState(blurLifecycleInterceptor)
     val currentOnDismissBeforeClose by rememberUpdatedState(onDismissRequestedBeforeClose)
+    val currentOnRequestDismiss by rememberUpdatedState(onRequestDismiss)
     val currentOnDismissCompleted by rememberUpdatedState(onDismissCompleted)
     val currentIsGestureDisabled by rememberUpdatedState(isGestureDisabled)
+    var pendingCollapseVelocity by remember { mutableStateOf<Float?>(null) }
 
     val resolvedOpaqueSurfaceColor = remember(opaqueSurfaceColor, cardBgColor) {
         opaqueSurfaceColor ?: run {
@@ -506,14 +513,14 @@ fun SharedContainerTransformOverlay(
         phase == ContainerTransitionPhase.DISMISSING ||
         isPredictiveBackActive ||
         isSwipingDismiss
-    val shouldComposeCompact by remember {
+    val shouldComposeCompact by remember(keepComposedUntilHostFinishes) {
         derivedStateOf {
-            phase == ContainerTransitionPhase.OPENING || phase == ContainerTransitionPhase.DISMISSING
+            hasMeasuredLayout && (keepComposedUntilHostFinishes || phase != ContainerTransitionPhase.DISMISSED)
         }
     }
-    val shouldComposeExpanded by remember {
+    val shouldComposeExpanded by remember(keepComposedUntilHostFinishes) {
         derivedStateOf {
-            phase != ContainerTransitionPhase.DISMISSING || animProgress.value > 0.38f
+            keepComposedUntilHostFinishes || phase != ContainerTransitionPhase.DISMISSED
         }
     }
 
@@ -704,10 +711,12 @@ fun SharedContainerTransformOverlay(
         }
     }
 
-    // External dismiss (e.g. Home key / window leave)
+    // External dismiss (e.g. host dismiss(), Home key / window leave)
     LaunchedEffect(externalDismissTrigger) {
         if (externalDismissTrigger > 0 && !hasDispatchedComplete && phase != ContainerTransitionPhase.DISMISSING) {
-            animateToClose()
+            val vel = pendingCollapseVelocity
+            pendingCollapseVelocity = null
+            animateToClose(initialVelocity = vel)
         }
     }
 
@@ -880,15 +889,24 @@ fun SharedContainerTransformOverlay(
                             }
                         }
                     } else if (phase != ContainerTransitionPhase.DISMISSING) {
-                        animateToClose()
+                        val onRequest = currentOnRequestDismiss
+                        if (onRequest != null) {
+                            onRequest()
+                        } else {
+                            animateToClose()
+                        }
                     }
                 }
             }
         }
     }
 
-    LaunchedEffect(hasDispatchedComplete, isGestureDisabled) {
-        backCallback.isEnabled = !hasDispatchedComplete && !isGestureDisabled
+    LaunchedEffect(keepComposedUntilHostFinishes, hasDispatchedComplete, isGestureDisabled) {
+        backCallback.isEnabled = if (keepComposedUntilHostFinishes) {
+            true
+        } else {
+            !hasDispatchedComplete && !isGestureDisabled
+        }
     }
 
     DisposableEffect(dispatcherOwner, lifecycleOwner, backCallback) {
@@ -940,8 +958,13 @@ fun SharedContainerTransformOverlay(
                     indication = null,
                     onClick = {
                         if (currentOnDismissBeforeClose()) return@clickable
-                        if (!currentIsGestureDisabled && phase != ContainerTransitionPhase.DISMISSING) {
-                            animateToClose()
+                        if (!currentIsGestureDisabled && !hasDispatchedComplete && phase != ContainerTransitionPhase.DISMISSING) {
+                            val onRequest = currentOnRequestDismiss
+                            if (onRequest != null) {
+                                onRequest()
+                            } else {
+                                animateToClose()
+                            }
                         }
                     }
                 )
@@ -981,23 +1004,10 @@ fun SharedContainerTransformOverlay(
                 }
             }
 
-            // Measured un-transformed card slot box (height locked once expandedContent disposes at
-            // p <= 0.38f so BoxWithConstraints keeps identical constraints while visible and layout
-            // size/center never collapse mid-flight)
-            val lockedDismissHeightModifier = if (
-                phase == ContainerTransitionPhase.DISMISSING &&
-                !shouldComposeExpanded &&
-                cardSlotSize.height > 0
-            ) {
-                Modifier.requiredHeight(with(density) { cardSlotSize.height.toDp() })
-            } else {
-                Modifier
-            }
             Box(
                 modifier = Modifier
                     .widthIn(max = cardMaxWidth)
                     .fillMaxWidth(cardWidthFraction)
-                    .then(lockedDismissHeightModifier)
                     .onGloballyPositioned { coords ->
                         if (coords.isAttached && phase != ContainerTransitionPhase.DISMISSING) {
                             val topLeft = if (originBoundsAreScreenCoords) {
@@ -1043,7 +1053,6 @@ fun SharedContainerTransformOverlay(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(lockedDismissHeightModifier)
                         .pointerInput(hasMeasuredLayout, currentIsGestureDisabled) {
                             if (!hasMeasuredLayout) return@pointerInput
                             val velocityTracker = VelocityTracker()
@@ -1099,7 +1108,13 @@ fun SharedContainerTransformOverlay(
                                     val pastThreshold = abs(curY) > dismissDragThresholdPx
                                     if (flungOut || pastThreshold) {
                                         val collapseVel = -(abs(vy) / dismissMaxDragPx).coerceIn(0.4f, 4.5f)
-                                        animateToClose(initialVelocity = collapseVel)
+                                        val onRequest = currentOnRequestDismiss
+                                        if (onRequest != null) {
+                                            pendingCollapseVelocity = collapseVel
+                                            onRequest()
+                                        } else {
+                                            animateToClose(initialVelocity = collapseVel)
+                                        }
                                     } else {
                                         val bounceVel = (abs(vy) / dismissMaxDragPx).coerceIn(0.2f, 3.0f)
                                         animateToOpen(preserveVelocity = bounceVel)
@@ -1158,8 +1173,11 @@ fun SharedContainerTransformOverlay(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                             onClick = {
-                                // Mid-close tap reverses smoothly back to open preserving velocity!
-                                if (phase == ContainerTransitionPhase.DISMISSING && !hasDispatchedComplete) {
+                                // Mid-close tap reverses smoothly back to open preserving velocity when not host-dismissed
+                                if (currentOnRequestDismiss == null &&
+                                    phase == ContainerTransitionPhase.DISMISSING &&
+                                    !hasDispatchedComplete
+                                ) {
                                     animateToOpen()
                                 }
                             }
@@ -1203,7 +1221,7 @@ fun SharedContainerTransformOverlay(
                                     scaleX = uniformNet / frame.scaleX.coerceAtLeast(0.05f)
                                     scaleY = uniformNet / frame.scaleY.coerceAtLeast(0.05f)
                                     alpha = frame.compactAlpha
-                                    compositingStrategy = if (isTransitioning || frame.compactAlpha < 0.999f) {
+                                    compositingStrategy = if (frame.compactAlpha in 0.001f..0.999f) {
                                         CompositingStrategy.Offscreen
                                     } else {
                                         CompositingStrategy.Auto
@@ -1215,7 +1233,8 @@ fun SharedContainerTransformOverlay(
                         }
                     }
 
-                    // Expanded popup layer (disposed cleanly once invisible at p <= 0.38f during collapse)
+                    // Expanded popup layer kept composed until DISMISSED so spring collapse runs
+                    // purely on GPU graphicsLayer transforms with zero mid-flight disposal jank.
                     DeferredComposition(
                         shouldCompose = shouldComposeExpanded,
                         deferOneFrame = false,
@@ -1232,7 +1251,7 @@ fun SharedContainerTransformOverlay(
                                     scaleX = aspectFixX * frame.expandedInnerScale
                                     scaleY = aspectFixY * frame.expandedInnerScale
                                     alpha = frame.expandedAlpha
-                                    compositingStrategy = if (isTransitioning || frame.expandedAlpha < 0.999f) {
+                                    compositingStrategy = if (frame.expandedAlpha in 0.001f..0.999f) {
                                         CompositingStrategy.Offscreen
                                     } else {
                                         CompositingStrategy.Auto
@@ -1243,7 +1262,12 @@ fun SharedContainerTransformOverlay(
                                 phase == ContainerTransitionPhase.DISMISSING,
                                 {
                                     if (!hasDispatchedComplete && phase != ContainerTransitionPhase.DISMISSING) {
-                                        animateToClose()
+                                        val onRequest = currentOnRequestDismiss
+                                        if (onRequest != null) {
+                                            onRequest()
+                                        } else {
+                                            animateToClose()
+                                        }
                                     }
                                 }
                             )

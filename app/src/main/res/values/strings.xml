@@ -6,4 +6,9 @@
     <string name="widget_icon_1x2_name">Large Icon 1×2</string>
     <string name="widget_icon_2x1_name">Large Icon 2×1</string>
     <string name="widget_icon_description">Customizable large app shortcut widget</string>
+    <string name="settings_title">Settings</string>
+    <string name="icon_style_title">Icon style</string>
+    <string name="icon_style_subtitle">Apply system palette colors to supported icons in folders, popups, and widgets.</string>
+    <string name="icon_style_original">Original</string>
+    <string name="icon_style_themed">Themed</string>
 </resources>

@@ -36,6 +36,7 @@ import com.example.data.LargeIconOrientations
 import com.example.ui.motion.FolderBlurSpec
 import com.example.ui.motion.SharedContainerTransformOverlay
 import com.example.util.AppScanner
+import com.example.util.rememberIconThemeSignature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -74,8 +75,16 @@ fun InAppLargeIconPreviewOverlay(
         (largeIcon.iconPaddingDp / 96f).coerceIn(0f, 0.30f) * shortPx
     }
 
-    val compactBitmap by produceState<Bitmap?>(
-        initialValue = AppScanner.getCachedLargeIconWidgetBitmap(
+    val themeSignature = rememberIconThemeSignature()
+    val cachedBitmap = remember(
+        largeIcon.packageName,
+        largeIcon.activityName,
+        compactWpx,
+        compactHpx,
+        compactInsetPx,
+        themeSignature
+    ) {
+        AppScanner.getCachedLargeIconWidgetBitmap(
             context,
             largeIcon.packageName,
             largeIcon.activityName,
@@ -83,12 +92,16 @@ fun InAppLargeIconPreviewOverlay(
             compactHpx,
             0f,
             compactInsetPx
-        ),
+        )
+    }
+    val compactBitmap by produceState<Bitmap?>(
+        initialValue = cachedBitmap,
         largeIcon.packageName,
         largeIcon.activityName,
         compactWpx,
         compactHpx,
-        compactInsetPx
+        compactInsetPx,
+        themeSignature
     ) {
         value = withContext(Dispatchers.IO) {
             AppScanner.renderLargeIconWidgetBitmap(

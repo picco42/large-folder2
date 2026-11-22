@@ -40,6 +40,7 @@ import com.example.data.LargeIconEntity
 import com.example.data.LargeIconOrientations
 import com.example.ui.theme.FolderWidgetTheme
 import com.example.util.AppScanner
+import com.example.util.rememberIconThemeSignature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -245,7 +246,15 @@ private fun LargeIconPickCard(
     onSelect: () -> Unit
 ) {
     val context = LocalContext.current
-    val iconBitmap by produceState<android.graphics.Bitmap?>(null, largeIcon.packageName, largeIcon.activityName, largeIcon.cornerRadiusDp) {
+    val themeSignature = rememberIconThemeSignature()
+    val iconBitmap by produceState<android.graphics.Bitmap?>(
+        null,
+        largeIcon.packageName,
+        largeIcon.activityName,
+        largeIcon.cornerRadiusDp,
+        largeIcon.iconPaddingDp,
+        themeSignature
+    ) {
         value = withContext(Dispatchers.IO) {
             AppScanner.renderLargeIconWidgetBitmap(
                 context = context,
