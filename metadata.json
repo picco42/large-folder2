@@ -1,0 +1,6 @@
+{
+  "name": "Folder Widget",
+  "description": "Large folder widgets for organizing home screen apps with frosted glass styling and one-tap launching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

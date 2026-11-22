@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Folder Widget</string>
+    <string name="widget_name">Large Folder</string>
+    <string name="widget_description">Large folder widget with directly tappable app icons</string>
+    <string name="widget_icon_1x1_name">Large Icon 1×1</string>
+    <string name="widget_icon_1x2_name">Large Icon 1×2</string>
+    <string name="widget_icon_2x1_name">Large Icon 2×1</string>
+    <string name="widget_icon_description">Customizable large app shortcut widget</string>
+</resources>
